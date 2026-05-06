@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ctb-report"
+version = "0.1.0"
+description = "Portable BOM capacity report generation with a reusable Python core and thin output adapters."
+readme = "README.md"
+requires-python = ">=3.10"
+scripts = { "ctb-report" = "ctb_report.cli:main" }
+dependencies = [
+  "pandas>=2.2",
+  "snowflake-connector-python[pandas]>=3.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

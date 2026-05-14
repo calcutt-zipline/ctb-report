@@ -51,13 +51,15 @@ class RelationsConfig:
     structured_bom_data: str = "fivetran_google_sheets.supply_chain_structured_bom_data"
     flat_parts_list: str = "fivetran_google_sheets.supply_chain_flat_parts_list"
     alternate_part_numbers: str = "fivetran_google_sheets.supply_chain_alternate_part_numbers"
-    alternate_part_numbers_column: str = '"_0109025_000_0109025_999_0109025_001"'
+    alternate_part_numbers_column: str = '"PART_NUMBERS"'
     supply_plans: str = "fivetran_google_sheets.supply_chain_supply_plans"
     stock_move: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_MOVE"
     product_product: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_PRODUCT"
     product_template: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_TEMPLATE"
     stock_location: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_LOCATION"
     inventory: str = "BIZ.DBT_ODOO.INVENTORY"
+    shipments: str = "BIZ.DBT_ODOO.SHIPMENTS"
+    shipment_lines: str = "BIZ.DBT_ODOO.SHIPMENT_PACKING_LIST"
 
 
 @dataclass(frozen=True)
@@ -75,11 +77,19 @@ class SupplyPlanConfig:
 
 
 @dataclass(frozen=True)
+class ShipmentLineConfig:
+    part_number_column: str = "DEFAULT_CODE"
+    quantity_column: str = "QUANTITY_IN_SHIPMENT"
+    status_column: str = "STATE"
+
+
+@dataclass(frozen=True)
 class ReportConfig:
     snowflake: SnowflakeConfig
     relations: RelationsConfig = field(default_factory=RelationsConfig)
     inventory: InventoryConfig = field(default_factory=InventoryConfig)
     supply_plan: SupplyPlanConfig = field(default_factory=SupplyPlanConfig)
+    shipment_line: ShipmentLineConfig = field(default_factory=ShipmentLineConfig)
     as_of_date: date = field(default_factory=date.today)
     timezone: str = "America/Los_Angeles"
     path_revision_pattern: str = r"\|[A-Za-z][A-Za-z0-9]{0,2}\|"

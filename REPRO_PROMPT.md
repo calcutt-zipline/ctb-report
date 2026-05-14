@@ -88,7 +88,7 @@ The supply plan `DATE` field is stored as `MM/DD` text without a year. Parse it 
 
 For alternate aggregation, use `fivetran_google_sheets.supply_chain_alternate_part_numbers`, which is a single-column Google Sheet of comma-separated alternate groups. The actual alternate-group column name is:
 
-- `"_0109025_000_0109025_999_0109025_001"`
+- `"PART_NUMBERS"`
 
 Treat all part numbers listed in the same comma-separated row as one alternate group. For a given base part number, alternate-aware metrics should aggregate that part plus all related parts in its group.
 
@@ -295,7 +295,7 @@ Historical receipts:
 Historical receipt average since last receipt:
 
 - use the most recent qualifying receipt
-- compute elapsed weeks since that receipt divided by the receipt quantity
+- compute the receipt quantity divided by elapsed weeks since that receipt
 
 Current inventory:
 

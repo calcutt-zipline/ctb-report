@@ -29,11 +29,16 @@ class ReportRepository:
             product_template=config.relations.product_template,
             stock_location=config.relations.stock_location,
             inventory=config.relations.inventory,
+            shipments=config.relations.shipments,
+            shipment_lines=config.relations.shipment_lines,
             inventory_part_number_column=config.inventory.part_number_column,
             inventory_quantity_column=config.inventory.quantity_column,
             inventory_location_id_column=config.inventory.location_id_column,
             supply_plan_part_number_column=config.supply_plan.part_number_column,
             supply_plan_quantity_column=config.supply_plan.quantity_column,
             supply_plan_date_column=config.supply_plan.date_column,
+            shipment_line_part_number_column=config.shipment_line.part_number_column,
+            shipment_line_quantity_column=config.shipment_line.quantity_column,
+            shipment_line_status_column=config.shipment_line.status_column,
         )
         return self.client.query(sql)

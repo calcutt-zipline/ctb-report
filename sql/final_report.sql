@@ -788,11 +788,8 @@ shipment_lines_normalized AS (
 in_transit_metrics AS (
     SELECT
         sln.PART_NUMBER,
-        CAST(SUM(QUANTITY) AS FLOAT) AS IN_TRANSIT_QUANTITY,
-        CAST(SUM(QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)) AS FLOAT) AS IN_TRANSIT_VALUE
+        CAST(SUM(QUANTITY) AS FLOAT) AS IN_TRANSIT_QUANTITY
     FROM shipment_lines_normalized sln
-    LEFT JOIN product_values pv
-        ON pv.PART_NUMBER = sln.PART_NUMBER
     WHERE sln.PART_NUMBER IS NOT NULL
       AND sln.SHIPMENT_STATUS NOT IN (
           'DRAFT',
@@ -813,12 +810,7 @@ alternate_in_transit_metrics AS (
             COALESCE(base_itm.IN_TRANSIT_QUANTITY, 0)
             + COALESCE(SUM(COALESCE(alternate_itm.IN_TRANSIT_QUANTITY, 0)), 0)
             AS FLOAT
-        ) AS "in-transit quantity including alternates",
-        CAST(
-            COALESCE(base_itm.IN_TRANSIT_VALUE, 0)
-            + COALESCE(SUM(COALESCE(alternate_itm.IN_TRANSIT_VALUE, 0)), 0)
-            AS FLOAT
-        ) AS "in-transit inventory value including alternates"
+        ) AS "in-transit quantity including alternates"
     FROM report_parts rp
     LEFT JOIN in_transit_metrics base_itm
         ON base_itm.PART_NUMBER = rp.PART_NUMBER
@@ -828,7 +820,7 @@ alternate_in_transit_metrics AS (
         ON alternate_itm.PART_NUMBER = ab.RELATED_PART_NUMBER
        AND ab.RELATED_PART_NUMBER <> rp.PART_NUMBER
        AND alternate_itm.IN_TRANSIT_QUANTITY > 0
-    GROUP BY rp.PART_NUMBER, base_itm.IN_TRANSIT_QUANTITY, base_itm.IN_TRANSIT_VALUE
+    GROUP BY rp.PART_NUMBER, base_itm.IN_TRANSIT_QUANTITY
 ),
 bom_line_parent_metrics AS (
     SELECT
@@ -1170,7 +1162,11 @@ SELECT
     im."Current Receiving & Pre-IQC Quantity",
     COALESCE(blpm."On Hand Quantity In Parents", 0) AS "On Hand Quantity In Parents",
     COALESCE(aitm."in-transit quantity including alternates", 0) AS "in-transit quantity including alternates",
-    COALESCE(aitm."in-transit inventory value including alternates", 0) AS "in-transit inventory value including alternates",
+    CAST(
+        COALESCE(aitm."in-transit quantity including alternates", 0)
+        * COALESCE(pv.PRODUCT_VALUE, 0)
+        AS FLOAT
+    ) AS "in-transit inventory value including alternates",
     COALESCE(im."Current On-Hand Quantity", 0)
         - COALESCE(pdm."Net Total Demand for Part Number in current week", 0) AS "On Hand Delta to Current Week Demand (each)",
     im."Current Quarantine Quantity",

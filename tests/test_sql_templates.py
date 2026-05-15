@@ -291,13 +291,17 @@ def test_inventory_value_columns_use_product_values() -> None:
         assert expected_products_relation[sql_file] in sql
         assert 'AS "Current On-Hand Inventory Value"' in sql
         assert 'AS "Current On-Hand Inventory Value with alternates"' in sql
-        assert "AS IN_TRANSIT_VALUE" in sql
         assert 'AS "in-transit inventory value including alternates"' in sql
         assert 'AS "Current On Hand Inventory Value Including alternates and parents"' in sql
         assert "inv.QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)" in sql or (
             "inv.${inventory_quantity_column} * COALESCE(pv.PRODUCT_VALUE, 0)" in sql
         )
-        assert "QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)" in sql
+        assert "AS IN_TRANSIT_VALUE" not in sql
+        assert (
+            'COALESCE(aitm."in-transit quantity including alternates", 0)\n'
+            "        * COALESCE(pv.PRODUCT_VALUE, 0)"
+            in sql
+        )
         assert 'COALESCE(aim."Current On-Hand Inventory Value with alternates", 0)' in sql
         assert 'COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(pv.PRODUCT_VALUE, 0)' in sql
         assert "LEFT JOIN product_values pv" in sql

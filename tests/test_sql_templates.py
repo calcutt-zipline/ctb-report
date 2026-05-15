@@ -128,13 +128,14 @@ def test_weeks_of_stock_uses_alternate_and_parent_on_hand_with_weekly_remaining_
         assert "part_number_weekly_remaining_demand AS" in sql
         assert "bom_line_demand_horizon AS" in sql
         assert "bom_line_weeks_of_stock AS" in sql
+        assert "system_alternate_bom_lines AS" in sql
         assert "system_min_weeks_of_stock AS" in sql
         assert "pwd.DEMAND_WEEK = DATE_TRUNC('week'," in sql
         assert "COALESCE(cwd.PRODUCTION_CONSUMPTION_THIS_WEEK, 0)" in sql
         assert "COALESCE(cwd.NEST_CONSUMPTION_THIS_WEEK, 0)" in sql
         assert 'COALESCE(aim."Current On-Hand Quantity with alternates", 0)' in sql
         assert 'COALESCE(blpm."On Hand Quantity In Parents", 0)' in sql
-        assert 'COALESCE(itm."in-transit quantity", 0)' in sql
+        assert 'COALESCE(aitm."in-transit quantity including alternates", 0)' in sql
         assert "AS ON_HAND_QUANTITY_INCLUDING_ALTERNATES_AND_PARENTS" in sql
         assert "AS ON_HAND_QUANTITY_INCLUDING_ALTERNATES_PARENTS_AND_IN_TRANSIT" in sql
         assert "AS IN_TRANSIT_QUANTITY" in sql
@@ -179,9 +180,16 @@ def test_weeks_of_stock_uses_alternate_and_parent_on_hand_with_weekly_remaining_
         assert "LEFT JOIN system_min_weeks_of_stock smwos" in sql
         assert "AND COALESCE(fpl.\"System\", '') = smwos.SYSTEM_GROUP" in sql
         assert "LEFT JOIN bom_line_parent_metrics blpm" in sql
-        assert "LEFT JOIN in_transit_metrics itm" in sql
+        assert "LEFT JOIN alternate_in_transit_metrics aitm" in sql
         assert "LEFT JOIN bom_line_weeks_of_stock pwos" in sql
         assert "ON fpl.PATH = pwos.PATH" in sql
+        assert "LEFT JOIN system_alternate_bom_lines sabl" in sql
+        assert "AND sabl.PATH IS NULL" in sql
+        assert "AND fpl.ADJUSTED_PROCUREMENT_INTENT = 'zipline_buy'" in sql
+        assert "AND NOT COALESCE(TRY_TO_BOOLEAN(TO_VARCHAR(fpl.IS_CONSUMABLE_STORABLE)), FALSE)" in sql
+        assert "INNER JOIN original_alternate_part_bridge ab" in sql
+        assert "AND ab.RELATED_PART_NUMBER <> ab.BASE_PART_NUMBER" in sql
+        assert 'AND COALESCE(original_fpl."System", \'\') = COALESCE(alternate_fpl."System", \'\')' in sql
 
 
 def test_receiving_pre_iqc_is_counted_with_warehouse_stock_and_reported_separately() -> None:
@@ -225,17 +233,26 @@ def test_in_transit_quantity_filters_terminal_shipments() -> None:
         sql = sql_file.read_text()
 
         assert "shipment_lines_normalized AS" in sql
+        assert "shipments_normalized AS" in sql
         assert "in_transit_metrics AS" in sql
-        assert 'AS "in-transit quantity"' in sql
+        assert "original_alternate_part_bridge AS" in sql
+        assert "alternate_in_transit_metrics AS" in sql
+        assert "AS IN_TRANSIT_QUANTITY" in sql
+        assert 'AS "in-transit quantity including alternates"' in sql
+        assert "f.index AS PART_INDEX" in sql
+        assert "WHERE original_part.PART_INDEX = 0" in sql
         assert "OBJECT_CONSTRUCT(*) AS shipment_line" in sql
         assert "OBJECT_CONSTRUCT(*) AS shipment" in sql
+        assert "ROW_NUMBER() OVER (\n                PARTITION BY SHIPMENT_ID" in sql
+        assert "WHERE RN = 1" in sql
         assert "TRY_TO_DOUBLE(TO_VARCHAR(shipment_line:" in sql
         assert "TO_VARCHAR(shipment_line:DEFAULT_CODE)" in sql
         assert "TO_VARCHAR(shipment_line:QUANTITY_IN_SHIPMENT)" in sql
         assert "TO_VARCHAR(shipment:STATE)" in sql
         assert "TO_VARCHAR(shipment:SHIPMENT_STATUS)" in sql
-        assert "TO_VARCHAR(shipment:SHIPMENT_ID) = TO_VARCHAR(shipment_line:SHIPMENT_ID)" in sql
-        assert "REGEXP_REPLACE(\n                UPPER(" in sql
+        assert "INNER JOIN shipments_normalized s" in sql
+        assert "ON s.SHIPMENT_ID = TO_VARCHAR(shipment_line:SHIPMENT_ID)" in sql
+        assert "REGEXP_REPLACE(\n                UPPER(TRIM(RAW_SHIPMENT_STATUS))" in sql
         assert "SHIPMENT_STATUS NOT IN" in sql
         assert "'DRAFT'" in sql
         assert "'CANCELED'" in sql
@@ -245,12 +262,45 @@ def test_in_transit_quantity_filters_terminal_shipments() -> None:
         assert "'COMPLETED'" in sql
         assert "'PENDING_DELIVERY'" not in sql
         assert "FCT_ZERP_LOGISTICS_SHIPMENT_LINES" not in sql
-        assert 'COALESCE(itm."in-transit quantity", 0) AS "in-transit quantity"' in sql
-        assert "LEFT JOIN in_transit_metrics itm" in sql
+        assert (
+            'COALESCE(aitm."in-transit quantity including alternates", 0) '
+            'AS "in-transit quantity including alternates"'
+            in sql
+        )
+        assert "LEFT JOIN in_transit_metrics base_itm" in sql
+        assert "LEFT JOIN in_transit_metrics alternate_itm" in sql
+        assert "alternate_itm.IN_TRANSIT_QUANTITY > 0" in sql
+        assert "LEFT JOIN alternate_in_transit_metrics aitm" in sql
 
     mode_sql = Path("sql/mode_bom_capacity_raw.sql").read_text()
     assert "FROM BIZ.DBT_ODOO.SHIPMENTS" in mode_sql
     assert "FROM BIZ.DBT_ODOO.SHIPMENT_PACKING_LIST" in mode_sql
+
+
+def test_inventory_value_columns_use_product_values() -> None:
+    expected_products_relation = {
+        Path("sql/final_report.sql"): "FROM ${products}",
+        Path("sql/mode_bom_capacity_raw.sql"): "FROM BIZ.DBT_ODOO.PRODUCTS",
+    }
+
+    for sql_file in SQL_FILES:
+        sql = sql_file.read_text()
+
+        assert "product_values AS" in sql
+        assert "MAX(PRODUCT_VALUE) AS PRODUCT_VALUE" in sql
+        assert expected_products_relation[sql_file] in sql
+        assert 'AS "Current On-Hand Inventory Value"' in sql
+        assert 'AS "Current On-Hand Inventory Value with alternates"' in sql
+        assert "AS IN_TRANSIT_VALUE" in sql
+        assert 'AS "in-transit inventory value including alternates"' in sql
+        assert 'AS "Current On Hand Inventory Value Including alternates and parents"' in sql
+        assert "inv.QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)" in sql or (
+            "inv.${inventory_quantity_column} * COALESCE(pv.PRODUCT_VALUE, 0)" in sql
+        )
+        assert "QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)" in sql
+        assert 'COALESCE(aim."Current On-Hand Inventory Value with alternates", 0)' in sql
+        assert 'COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(pv.PRODUCT_VALUE, 0)' in sql
+        assert "LEFT JOIN product_values pv" in sql
 
 
 def test_on_hand_quantity_in_parents_excludes_top_level_assemblies() -> None:
@@ -269,7 +319,7 @@ def test_on_hand_quantity_in_parents_excludes_top_level_assemblies() -> None:
         assert 'AS "on hand + in transit product sets"' in sql
         assert (
             'COALESCE(aim."Current On-Hand Quantity with alternates", 0)\n'
-            '                        + COALESCE(itm."in-transit quantity", 0)'
+            '                        + COALESCE(aitm."in-transit quantity including alternates", 0)'
             in sql
         )
         assert (

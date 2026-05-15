@@ -39,8 +39,10 @@ def test_report_service_shapes_final_columns() -> None:
     assert "on hand product sets including alternates" in df.columns
     assert "receiving & pre-iqc product sets" in df.columns
     assert "On Hand Quantity In Parents" in df.columns
-    assert "in-transit quantity" in df.columns
+    assert "in-transit quantity including alternates" in df.columns
+    assert "in-transit inventory value including alternates" in df.columns
     assert "Current On Hand Quantity Including alternates and parents" in df.columns
+    assert "Current On Hand Inventory Value Including alternates and parents" in df.columns
     assert "on hand product sets including alternates and parents" in df.columns
     assert "on hand + in transit product sets" in df.columns
     assert "Weeks of Stock" in df.columns
@@ -278,7 +280,7 @@ def test_report_service_calculates_on_hand_quantity_in_non_top_level_parents() -
                     "ADJUSTED_PROCUREMENT_INTENT": "zipline_buy",
                     "Current On-Hand Quantity": 10,
                     "Current On-Hand Quantity with alternates": 10,
-                    "in-transit quantity": 20,
+                    "in-transit quantity including alternates": 20,
                 },
                 {
                     "PATH": "|10000-000|40000-000|",
@@ -292,7 +294,7 @@ def test_report_service_calculates_on_hand_quantity_in_non_top_level_parents() -
                     "ADJUSTED_PROCUREMENT_INTENT": "zipline_buy",
                     "Current On-Hand Quantity": 7,
                     "Current On-Hand Quantity with alternates": 7,
-                    "in-transit quantity": 1,
+                    "in-transit quantity including alternates": 1,
                 },
             ]
         )

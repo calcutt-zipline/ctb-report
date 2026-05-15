@@ -5,6 +5,29 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 import os
+import re
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _default_snowflake_connection_name() -> Optional[str]:
+    for path in (Path.home() / ".snowflake" / "connections.toml", Path.home() / ".snowflake" / "config.toml"):
+        if not path.exists():
+            continue
+
+        match = re.search(
+            r"(?m)^\s*default_connection_name\s*=\s*[\"']?([^\"'\s#]+)",
+            path.read_text(),
+        )
+        if match:
+            return match.group(1)
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -18,17 +41,18 @@ class SnowflakeConfig:
     database: Optional[str] = None
     schema: Optional[str] = None
     role: Optional[str] = None
+    client_store_temporary_credential: bool = False
 
     @classmethod
     def from_env(cls) -> "SnowflakeConfig":
-        connection_name = os.environ.get("SNOWFLAKE_CONNECTION_NAME")
+        connection_name = os.environ.get("SNOWFLAKE_CONNECTION_NAME") or _default_snowflake_connection_name()
         user = os.environ.get("SNOWFLAKE_USER")
         account = os.environ.get("SNOWFLAKE_ACCOUNT")
 
         if not (account and user) and not connection_name:
             raise ValueError(
-                "Missing Snowflake credentials. Set SNOWFLAKE_CONNECTION_NAME or both "
-                "SNOWFLAKE_ACCOUNT and SNOWFLAKE_USER."
+                "Missing Snowflake credentials. Set SNOWFLAKE_CONNECTION_NAME, configure a default "
+                "Snowflake connection, or set both SNOWFLAKE_ACCOUNT and SNOWFLAKE_USER."
             )
 
         return cls(
@@ -41,6 +65,10 @@ class SnowflakeConfig:
             database=os.environ.get("SNOWFLAKE_DATABASE"),
             schema=os.environ.get("SNOWFLAKE_SCHEMA"),
             role=os.environ.get("SNOWFLAKE_ROLE"),
+            client_store_temporary_credential=_env_bool(
+                "SNOWFLAKE_CLIENT_STORE_TEMPORARY_CREDENTIAL",
+                False,
+            ),
         )
 
 
@@ -56,6 +84,7 @@ class RelationsConfig:
     stock_move: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_MOVE"
     product_product: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_PRODUCT"
     product_template: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_TEMPLATE"
+    products: str = "BIZ.DBT_ODOO.PRODUCTS"
     stock_location: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_LOCATION"
     inventory: str = "BIZ.DBT_ODOO.INVENTORY"
     shipments: str = "BIZ.DBT_ODOO.SHIPMENTS"

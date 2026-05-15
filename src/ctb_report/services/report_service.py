@@ -26,8 +26,11 @@ RECEIVING_PRE_IQC_QUANTITY_COLUMN = "Current Receiving & Pre-IQC Quantity"
 RECEIVING_PRE_IQC_PRODUCT_SETS_COLUMN = "receiving & pre-iqc product sets"
 PARENT_ON_HAND_COLUMN = "On Hand Quantity In Parents"
 COMBINED_ON_HAND_COLUMN = "Current On Hand Quantity Including alternates and parents"
+COMBINED_ON_HAND_VALUE_COLUMN = "Current On Hand Inventory Value Including alternates and parents"
 COMBINED_PRODUCT_SETS_COLUMN = "on hand product sets including alternates and parents"
 ON_HAND_IN_TRANSIT_PRODUCT_SETS_COLUMN = "on hand + in transit product sets"
+IN_TRANSIT_QUANTITY_COLUMN = "in-transit quantity including alternates"
+IN_TRANSIT_VALUE_COLUMN = "in-transit inventory value including alternates"
 CURRENT_WEEK_NET_DEMAND_COLUMN = "Current Week Net Demand"
 CURRENT_WEEK_NET_TOTAL_DEMAND_COLUMN = "Current Week Net Total Demand"
 ZERO_FILL_COLUMNS = [
@@ -45,7 +48,9 @@ ZERO_FILL_COLUMNS = [
     "Current Receiving & Pre-IQC Quantity (each)",
     PARENT_ON_HAND_COLUMN,
     COMBINED_ON_HAND_COLUMN,
-    "in-transit quantity",
+    COMBINED_ON_HAND_VALUE_COLUMN,
+    IN_TRANSIT_QUANTITY_COLUMN,
+    IN_TRANSIT_VALUE_COLUMN,
     "On Hand Delta to Current Week Demand (each)",
     "Current Quarantine Quantity (each)",
     "Current Week Realized Supply (each)",
@@ -128,6 +133,14 @@ class BomCapacityReportService:
         if COMBINED_ON_HAND_COLUMN in df.columns:
             df[COMBINED_ON_HAND_COLUMN] = (
                 pd.to_numeric(df[COMBINED_ON_HAND_COLUMN], errors="coerce").fillna(0).astype("float64")
+            )
+        if COMBINED_ON_HAND_VALUE_COLUMN in df.columns:
+            df[COMBINED_ON_HAND_VALUE_COLUMN] = (
+                pd.to_numeric(df[COMBINED_ON_HAND_VALUE_COLUMN], errors="coerce").fillna(0).astype("float64")
+            )
+        if IN_TRANSIT_VALUE_COLUMN in df.columns:
+            df[IN_TRANSIT_VALUE_COLUMN] = (
+                pd.to_numeric(df[IN_TRANSIT_VALUE_COLUMN], errors="coerce").fillna(0).astype("float64")
             )
         if COMBINED_PRODUCT_SETS_COLUMN in df.columns:
             df[COMBINED_PRODUCT_SETS_COLUMN] = pd.to_numeric(
@@ -317,7 +330,7 @@ class BomCapacityReportService:
 
         on_hand_column = f"Current On-Hand Quantity (each){ALTERNATE_SUFFIX}"
         has_on_hand = on_hand_column in df.columns
-        has_in_transit = "in-transit quantity" in df.columns
+        has_in_transit = IN_TRANSIT_QUANTITY_COLUMN in df.columns
         if not has_on_hand and not has_in_transit:
             return df
 
@@ -328,7 +341,7 @@ class BomCapacityReportService:
             else pd.Series(0.0, index=df.index)
         )
         in_transit_quantity = (
-            pd.to_numeric(df["in-transit quantity"], errors="coerce").fillna(0)
+            pd.to_numeric(df[IN_TRANSIT_QUANTITY_COLUMN], errors="coerce").fillna(0)
             if has_in_transit
             else pd.Series(0.0, index=df.index)
         )

@@ -13,6 +13,8 @@ Portable BOM capacity reporting with:
 3. Set Snowflake environment variables or pass values into `ReportConfig`.
 4. Put Snowflake settings in `.env`, then run `ctb-report --overwrite --output outputs/bom_capacity_report.csv`, `python -m ctb_report --overwrite`, or use the notebook in `notebooks/bom_capacity_report.ipynb`.
 
+For ad hoc Snowflake checks, use `ctb-snowflake-sql --file query.sql` or pass multiple `--file`/`--sql` arguments. The runner keeps one Snowflake connection open for all statements in that invocation, uses `SNOWFLAKE_CONNECTION_NAME` or your default `~/.snowflake/connections.toml` connection, and disables temporary credential storage by default, avoiding macOS Keychain/Apple Passwords while reducing repeated browser prompts.
+
 ## Package layout
 
 - `src/ctb_report/domain`: pure business logic and models

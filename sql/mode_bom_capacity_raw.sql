@@ -246,10 +246,20 @@ report_parts AS (
 alternate_part_groups AS (
     SELECT DISTINCT
         alt._ROW AS GROUP_ID,
+        f.index AS PART_INDEX,
         TRIM(f.value::string) AS PART_NUMBER
     FROM fivetran_google_sheets.supply_chain_alternate_part_numbers alt,
          LATERAL FLATTEN(input => SPLIT(alt."PART_NUMBERS", ',')) f
     WHERE TRIM(f.value::string) <> ''
+),
+original_alternate_part_bridge AS (
+    SELECT DISTINCT
+        original_part.PART_NUMBER AS BASE_PART_NUMBER,
+        alternate_part.PART_NUMBER AS RELATED_PART_NUMBER
+    FROM alternate_part_groups original_part
+    INNER JOIN alternate_part_groups alternate_part
+        ON original_part.GROUP_ID = alternate_part.GROUP_ID
+    WHERE original_part.PART_INDEX = 0
 ),
 alternate_part_bridge AS (
     SELECT DISTINCT
@@ -302,6 +312,14 @@ latest_issued_po AS (
         PO_CREATED_AT_LOCAL AS "Latest PO Creation Date"
     FROM latest_issued_po_candidates
     WHERE RN = 1
+),
+product_values AS (
+    SELECT
+        DEFAULT_CODE AS PART_NUMBER,
+        MAX(PRODUCT_VALUE) AS PRODUCT_VALUE
+    FROM BIZ.DBT_ODOO.PRODUCTS
+    WHERE DEFAULT_CODE IS NOT NULL
+    GROUP BY DEFAULT_CODE
 ),
 location_category_map AS (
     SELECT
@@ -686,12 +704,63 @@ inventory_metrics AS (
     SELECT
         inv.DEFAULT_CODE AS PART_NUMBER,
         SUM(CASE WHEN lcm.MRP_CATEGORY IN ('Warehouse', 'Receiving & Pre-IQC') THEN inv.QUANTITY ELSE 0 END) AS "Current On-Hand Quantity",
+        SUM(CASE WHEN lcm.MRP_CATEGORY IN ('Warehouse', 'Receiving & Pre-IQC') THEN inv.QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0) ELSE 0 END) AS "Current On-Hand Inventory Value",
         SUM(CASE WHEN lcm.MRP_CATEGORY = 'Receiving & Pre-IQC' THEN inv.QUANTITY ELSE 0 END) AS "Current Receiving & Pre-IQC Quantity",
         SUM(CASE WHEN lcm.MRP_CATEGORY = 'Quarantine' THEN inv.QUANTITY ELSE 0 END) AS "Current Quarantine Quantity"
     FROM BIZ.DBT_ODOO.INVENTORY inv
     LEFT JOIN location_category_map lcm
         ON lcm.ID = inv.STOCK_LOCATION_ID
+    LEFT JOIN product_values pv
+        ON pv.PART_NUMBER = inv.DEFAULT_CODE
     GROUP BY inv.DEFAULT_CODE
+),
+shipments_normalized AS (
+    SELECT
+        SHIPMENT_ID,
+        COALESCE(
+            REGEXP_REPLACE(
+                UPPER(TRIM(RAW_SHIPMENT_STATUS)),
+                '[^A-Z0-9]+',
+                '_'
+            ),
+            ''
+        ) AS SHIPMENT_STATUS
+    FROM (
+        SELECT
+            SHIPMENT_ID,
+            RAW_SHIPMENT_STATUS,
+            ROW_NUMBER() OVER (
+                PARTITION BY SHIPMENT_ID
+                ORDER BY SHIPMENT_UPDATED_AT DESC NULLS LAST, RAW_SHIPMENT_STATUS
+            ) AS RN
+        FROM (
+            SELECT
+                COALESCE(
+                    TO_VARCHAR(shipment:SHIPMENT_ID),
+                    TO_VARCHAR(shipment:ID)
+                ) AS SHIPMENT_ID,
+                COALESCE(
+                    TO_VARCHAR(shipment:STATE),
+                    TO_VARCHAR(shipment:STATUS),
+                    TO_VARCHAR(shipment:SHIPMENT_STATUS)
+                ) AS RAW_SHIPMENT_STATUS,
+                COALESCE(
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:UPDATED_AT)),
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:UPDATED_DATE)),
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:WRITE_DATE)),
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:MODIFIED_AT)),
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:_FIVETRAN_SYNCED)),
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:CREATED_AT)),
+                    TRY_TO_TIMESTAMP_NTZ(TO_VARCHAR(shipment:CREATE_DATE))
+                ) AS SHIPMENT_UPDATED_AT
+            FROM (
+                SELECT OBJECT_CONSTRUCT(*) AS shipment
+                FROM BIZ.DBT_ODOO.SHIPMENTS
+            )
+        )
+        WHERE SHIPMENT_ID IS NOT NULL
+    )
+    WHERE RN = 1
 ),
 shipment_lines_normalized AS (
     SELECT
@@ -708,39 +777,24 @@ shipment_lines_normalized AS (
             TRY_TO_DOUBLE(TO_VARCHAR(shipment_line:PRODUCT_UOM_QTY)),
             0
         ) AS QUANTITY,
-        COALESCE(
-            REGEXP_REPLACE(
-                UPPER(
-                    TRIM(
-                        COALESCE(
-                            TO_VARCHAR(shipment:STATE),
-                            TO_VARCHAR(shipment:STATUS),
-                            TO_VARCHAR(shipment:SHIPMENT_STATUS)
-                        )
-                    )
-                ),
-                '[^A-Z0-9]+',
-                '_'
-            ),
-            ''
-        ) AS SHIPMENT_STATUS
+        s.SHIPMENT_STATUS
     FROM (
         SELECT OBJECT_CONSTRUCT(*) AS shipment_line
         FROM BIZ.DBT_ODOO.SHIPMENT_PACKING_LIST
     ) sl
-    INNER JOIN (
-        SELECT OBJECT_CONSTRUCT(*) AS shipment
-        FROM BIZ.DBT_ODOO.SHIPMENTS
-    ) s
-        ON TO_VARCHAR(shipment:SHIPMENT_ID) = TO_VARCHAR(shipment_line:SHIPMENT_ID)
+    INNER JOIN shipments_normalized s
+        ON s.SHIPMENT_ID = TO_VARCHAR(shipment_line:SHIPMENT_ID)
 ),
 in_transit_metrics AS (
     SELECT
-        PART_NUMBER,
-        CAST(SUM(QUANTITY) AS FLOAT) AS "in-transit quantity"
-    FROM shipment_lines_normalized
-    WHERE PART_NUMBER IS NOT NULL
-      AND SHIPMENT_STATUS NOT IN (
+        sln.PART_NUMBER,
+        CAST(SUM(QUANTITY) AS FLOAT) AS IN_TRANSIT_QUANTITY,
+        CAST(SUM(QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)) AS FLOAT) AS IN_TRANSIT_VALUE
+    FROM shipment_lines_normalized sln
+    LEFT JOIN product_values pv
+        ON pv.PART_NUMBER = sln.PART_NUMBER
+    WHERE sln.PART_NUMBER IS NOT NULL
+      AND sln.SHIPMENT_STATUS NOT IN (
           'DRAFT',
           'CANCELED',
           'CANCELLED',
@@ -750,7 +804,31 @@ in_transit_metrics AS (
           'COMPLETED',
           'DONE'
       )
-    GROUP BY PART_NUMBER
+    GROUP BY sln.PART_NUMBER
+),
+alternate_in_transit_metrics AS (
+    SELECT
+        rp.PART_NUMBER,
+        CAST(
+            COALESCE(base_itm.IN_TRANSIT_QUANTITY, 0)
+            + COALESCE(SUM(COALESCE(alternate_itm.IN_TRANSIT_QUANTITY, 0)), 0)
+            AS FLOAT
+        ) AS "in-transit quantity including alternates",
+        CAST(
+            COALESCE(base_itm.IN_TRANSIT_VALUE, 0)
+            + COALESCE(SUM(COALESCE(alternate_itm.IN_TRANSIT_VALUE, 0)), 0)
+            AS FLOAT
+        ) AS "in-transit inventory value including alternates"
+    FROM report_parts rp
+    LEFT JOIN in_transit_metrics base_itm
+        ON base_itm.PART_NUMBER = rp.PART_NUMBER
+    LEFT JOIN original_alternate_part_bridge ab
+        ON ab.BASE_PART_NUMBER = rp.PART_NUMBER
+    LEFT JOIN in_transit_metrics alternate_itm
+        ON alternate_itm.PART_NUMBER = ab.RELATED_PART_NUMBER
+       AND ab.RELATED_PART_NUMBER <> rp.PART_NUMBER
+       AND alternate_itm.IN_TRANSIT_QUANTITY > 0
+    GROUP BY rp.PART_NUMBER, base_itm.IN_TRANSIT_QUANTITY, base_itm.IN_TRANSIT_VALUE
 ),
 bom_line_parent_metrics AS (
     SELECT
@@ -792,6 +870,7 @@ alternate_inventory_metrics AS (
     SELECT
         ab.BASE_PART_NUMBER AS PART_NUMBER,
         SUM(COALESCE(im."Current On-Hand Quantity", 0)) AS "Current On-Hand Quantity with alternates",
+        SUM(COALESCE(im."Current On-Hand Inventory Value", 0)) AS "Current On-Hand Inventory Value with alternates",
         SUM(COALESCE(im."Current Receiving & Pre-IQC Quantity", 0)) AS "Current Receiving & Pre-IQC Quantity with alternates",
         SUM(COALESCE(im."Current Quarantine Quantity", 0)) AS "Current Quarantine Quantity with alternates"
     FROM alternate_part_bridge ab
@@ -839,9 +918,9 @@ bom_line_weeks_of_stock_base AS (
             AS ON_HAND_QUANTITY_INCLUDING_ALTERNATES_AND_PARENTS,
         COALESCE(aim."Current On-Hand Quantity with alternates", 0)
             + COALESCE(blpm."On Hand Quantity In Parents", 0)
-            + COALESCE(itm."in-transit quantity", 0)
+            + COALESCE(aitm."in-transit quantity including alternates", 0)
             AS ON_HAND_QUANTITY_INCLUDING_ALTERNATES_PARENTS_AND_IN_TRANSIT,
-        COALESCE(itm."in-transit quantity", 0) AS IN_TRANSIT_QUANTITY
+        COALESCE(aitm."in-transit quantity including alternates", 0) AS IN_TRANSIT_QUANTITY
     FROM bom_line_demand_horizon bldh
     INNER JOIN week_offsets wo
         ON wo.WEEK_OFFSET <= bldh.MAX_WEEK_OFFSET
@@ -853,8 +932,8 @@ bom_line_weeks_of_stock_base AS (
         ON bldh.PART_NUMBER = aim.PART_NUMBER
     LEFT JOIN bom_line_parent_metrics blpm
         ON bldh.PATH = blpm.PATH
-    LEFT JOIN in_transit_metrics itm
-        ON bldh.PART_NUMBER = itm.PART_NUMBER
+    LEFT JOIN alternate_in_transit_metrics aitm
+        ON bldh.PART_NUMBER = aitm.PART_NUMBER
 ),
 bom_line_weekly_stock_position AS (
     SELECT
@@ -927,6 +1006,19 @@ bom_line_weeks_of_stock AS (
     FROM bom_line_weekly_stock_coverage
     GROUP BY PATH, PART_NUMBER, REVISION
 ),
+system_alternate_bom_lines AS (
+    SELECT DISTINCT
+        alternate_fpl.PATH
+    FROM flat_parts_lookup alternate_fpl
+    INNER JOIN original_alternate_part_bridge ab
+        ON ab.RELATED_PART_NUMBER = alternate_fpl.PART_NUMBER
+       AND ab.RELATED_PART_NUMBER <> ab.BASE_PART_NUMBER
+    INNER JOIN flat_parts_lookup original_fpl
+        ON original_fpl.PART_NUMBER = ab.BASE_PART_NUMBER
+       AND original_fpl.TOP_LEVEL_BOM = alternate_fpl.TOP_LEVEL_BOM
+       AND COALESCE(original_fpl.TOP_LEVEL_REVISION, '') = COALESCE(alternate_fpl.TOP_LEVEL_REVISION, '')
+       AND COALESCE(original_fpl."System", '') = COALESCE(alternate_fpl."System", '')
+),
 system_min_weeks_of_stock AS (
     SELECT
         TOP_LEVEL_BOM,
@@ -949,7 +1041,12 @@ system_min_weeks_of_stock AS (
         FROM flat_parts_lookup fpl
         LEFT JOIN bom_line_weeks_of_stock pwos
             ON fpl.PATH = pwos.PATH
+        LEFT JOIN system_alternate_bom_lines sabl
+            ON fpl.PATH = sabl.PATH
         WHERE fpl.TOP_LEVEL_BOM IS NOT NULL
+          AND sabl.PATH IS NULL
+          AND fpl.ADJUSTED_PROCUREMENT_INTENT = 'zipline_buy'
+          AND NOT COALESCE(TRY_TO_BOOLEAN(TO_VARCHAR(fpl.IS_CONSUMABLE_STORABLE)), FALSE)
     ) ranked_system_parts
     WHERE SYSTEM_MIN_WEEKS_RANK = 1
 ),
@@ -1072,7 +1169,8 @@ SELECT
     im."Current On-Hand Quantity",
     im."Current Receiving & Pre-IQC Quantity",
     COALESCE(blpm."On Hand Quantity In Parents", 0) AS "On Hand Quantity In Parents",
-    COALESCE(itm."in-transit quantity", 0) AS "in-transit quantity",
+    COALESCE(aitm."in-transit quantity including alternates", 0) AS "in-transit quantity including alternates",
+    COALESCE(aitm."in-transit inventory value including alternates", 0) AS "in-transit inventory value including alternates",
     COALESCE(im."Current On-Hand Quantity", 0)
         - COALESCE(pdm."Net Total Demand for Part Number in current week", 0) AS "On Hand Delta to Current Week Demand (each)",
     im."Current Quarantine Quantity",
@@ -1090,6 +1188,11 @@ SELECT
         + COALESCE(blpm."On Hand Quantity In Parents", 0)
         AS FLOAT
     ) AS "Current On Hand Quantity Including alternates and parents",
+    CAST(
+        COALESCE(aim."Current On-Hand Inventory Value with alternates", 0)
+        + COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(pv.PRODUCT_VALUE, 0)
+        AS FLOAT
+    ) AS "Current On Hand Inventory Value Including alternates and parents",
     CAST(
         CASE
             WHEN prq.TOTAL_ROLLED_UP_QUANTITY_NUMERIC IS NULL
@@ -1144,7 +1247,7 @@ SELECT
                       OR prq.TOTAL_ROLLED_UP_QUANTITY_NUMERIC = 0 THEN 0
                     ELSE (
                         COALESCE(aim."Current On-Hand Quantity with alternates", 0)
-                        + COALESCE(itm."in-transit quantity", 0)
+                        + COALESCE(aitm."in-transit quantity including alternates", 0)
                     ) / prq.TOTAL_ROLLED_UP_QUANTITY_NUMERIC
                 END
                 + COALESCE(blpm.ON_HAND_PRODUCT_SETS_IN_PARENTS, 0)
@@ -1189,6 +1292,8 @@ LEFT JOIN planning_alternates pa
 LEFT JOIN latest_issued_po lpo
     ON fpl.PART_NUMBER = lpo.PART_NUMBER
    AND COALESCE(fpl.REVISION, '') = COALESCE(lpo.REVISION, '')
+LEFT JOIN product_values pv
+    ON fpl.PART_NUMBER = pv.PART_NUMBER
 LEFT JOIN demand_metrics dm
     ON fpl.PATH = dm.PATH
 LEFT JOIN part_number_demand_metrics pdm
@@ -1200,8 +1305,8 @@ LEFT JOIN alternate_receipt_metrics arm
     ON fpl.PART_NUMBER = arm.PART_NUMBER
 LEFT JOIN inventory_metrics im
     ON fpl.PART_NUMBER = im.PART_NUMBER
-LEFT JOIN in_transit_metrics itm
-    ON fpl.PART_NUMBER = itm.PART_NUMBER
+LEFT JOIN alternate_in_transit_metrics aitm
+    ON fpl.PART_NUMBER = aitm.PART_NUMBER
 LEFT JOIN bom_line_parent_metrics blpm
     ON fpl.PATH = blpm.PATH
 LEFT JOIN alternate_inventory_metrics aim

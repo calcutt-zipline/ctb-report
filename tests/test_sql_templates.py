@@ -277,34 +277,47 @@ def test_in_transit_quantity_filters_terminal_shipments() -> None:
     assert "FROM BIZ.DBT_ODOO.SHIPMENT_PACKING_LIST" in mode_sql
 
 
-def test_inventory_value_columns_use_product_values() -> None:
-    expected_products_relation = {
-        Path("sql/final_report.sql"): "FROM ${products}",
-        Path("sql/mode_bom_capacity_raw.sql"): "FROM BIZ.DBT_ODOO.PRODUCTS",
-    }
-
+def test_inventory_value_columns_use_latest_zerp_po_unit_costs() -> None:
     for sql_file in SQL_FILES:
         sql = sql_file.read_text()
 
-        assert "product_values AS" in sql
-        assert "MAX(PRODUCT_VALUE) AS PRODUCT_VALUE" in sql
-        assert expected_products_relation[sql_file] in sql
+        assert "latest_zerp_po_line_versions AS" in sql
+        assert "latest_zerp_po_lines AS" in sql
+        assert "part_unit_costs AS" in sql
+        assert "FROM BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER_LINE pol" in sql
+        assert "LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER_VERSION pov" in sql
+        assert "LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER po" in sql
+        assert "LEFT JOIN BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_TEMPLATE op" in sql
+        assert "LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__UOM zuom" in sql
+        assert "LEFT JOIN BIZ.DBT_STG.STG_ODOO_PROD__UOM_UOM ouom" in sql
+        assert "WHERE pov.STATUS = 'ISSUED'" in sql
+        assert "pol.UNIT_PRICE_UCENTS / 100000000.0 AS UNIT_PRICE" in sql
+        assert "ouom.FACTOR AS UOM_FACTOR" in sql
+        assert "WHEN ouom.FACTOR IS NULL THEN pol.UNIT_PRICE_UCENTS / 100000000.0" in sql
+        assert "ELSE pol.UNIT_PRICE_UCENTS / 100000000.0 * ouom.FACTOR" in sql
+        assert "END AS UNIT_COST" in sql
+        assert "WHERE LINE_VERSION_RN = 1" in sql
+        assert "PURCHASE_ORDER_NUMBER AS \"Latest PO\"" in sql
         assert 'AS "Current On-Hand Inventory Value"' in sql
         assert 'AS "Current On-Hand Inventory Value with alternates"' in sql
         assert 'AS "in-transit inventory value including alternates"' in sql
         assert 'AS "Current On Hand Inventory Value Including alternates and parents"' in sql
-        assert "inv.QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0)" in sql or (
-            "inv.${inventory_quantity_column} * COALESCE(pv.PRODUCT_VALUE, 0)" in sql
+        assert "inv.QUANTITY * COALESCE(puc.UNIT_COST, 0)" in sql or (
+            "inv.${inventory_quantity_column} * COALESCE(puc.UNIT_COST, 0)" in sql
         )
+        assert "PRODUCT_VALUE" not in sql
+        assert "product_values AS" not in sql
+        assert "BIZ.DBT_ODOO.PRODUCTS" not in sql
+        assert "${products}" not in sql
         assert "AS IN_TRANSIT_VALUE" not in sql
         assert (
             'COALESCE(aitm."in-transit quantity including alternates", 0)\n'
-            "        * COALESCE(pv.PRODUCT_VALUE, 0)"
+            "        * COALESCE(puc.UNIT_COST, 0)"
             in sql
         )
         assert 'COALESCE(aim."Current On-Hand Inventory Value with alternates", 0)' in sql
-        assert 'COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(pv.PRODUCT_VALUE, 0)' in sql
-        assert "LEFT JOIN product_values pv" in sql
+        assert 'COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(puc.UNIT_COST, 0)' in sql
+        assert "LEFT JOIN part_unit_costs puc" in sql
 
 
 def test_on_hand_quantity_in_parents_excludes_top_level_assemblies() -> None:

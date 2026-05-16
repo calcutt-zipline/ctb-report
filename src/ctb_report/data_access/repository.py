@@ -27,7 +27,6 @@ class ReportRepository:
             stock_move=config.relations.stock_move,
             product_product=config.relations.product_product,
             product_template=config.relations.product_template,
-            products=config.relations.products,
             stock_location=config.relations.stock_location,
             inventory=config.relations.inventory,
             shipments=config.relations.shipments,

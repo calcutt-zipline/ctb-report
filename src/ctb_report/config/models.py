@@ -84,7 +84,6 @@ class RelationsConfig:
     stock_move: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_MOVE"
     product_product: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_PRODUCT"
     product_template: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_TEMPLATE"
-    products: str = "BIZ.DBT_ODOO.PRODUCTS"
     stock_location: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_LOCATION"
     inventory: str = "BIZ.DBT_ODOO.INVENTORY"
     shipments: str = "BIZ.DBT_ODOO.SHIPMENTS"

@@ -286,40 +286,91 @@ planning_alternates AS (
         ON rp.PART_NUMBER = related.BASE_PART_NUMBER
     GROUP BY rp.PART_NUMBER
 ),
+latest_zerp_po_line_versions AS (
+    SELECT
+        pol.ID,
+        po.PURCHASE_ORDER_NUMBER,
+        pol.LINE_NUMBER,
+        pol.CREATED_AT AS PO_CREATED_AT_LOCAL,
+        op.DEFAULT_CODE AS PART_NUMBER,
+        suppliers.NAME AS SUPPLIER_NAME,
+        pol.MAJOR_REVISION_NAME AS REVISION,
+        pol.UNIT_PRICE_UCENTS / 100000000.0 AS UNIT_PRICE,
+        ouom.FACTOR AS UOM_FACTOR,
+        CASE
+            WHEN ouom.FACTOR IS NULL THEN pol.UNIT_PRICE_UCENTS / 100000000.0
+            ELSE pol.UNIT_PRICE_UCENTS / 100000000.0 * ouom.FACTOR
+        END AS UNIT_COST,
+        ROW_NUMBER() OVER (
+            PARTITION BY po.PURCHASE_ORDER_NUMBER, pol.LINE_NUMBER, op.DEFAULT_CODE
+            ORDER BY pol.CREATED_AT DESC, pol.ID DESC
+        ) AS LINE_VERSION_RN
+    FROM BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER_LINE pol
+    LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER_VERSION pov
+        ON pol.PURCHASE_ORDER_VERSION_ID = pov.ID
+    LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER po
+        ON pov.PURCHASE_ORDER_ID = po.ID
+    LEFT JOIN BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_TEMPLATE op
+        ON pol.ODOO_PART_ID = op.ID
+    LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__SUPPLIER suppliers
+        ON suppliers.ID = pov.SUPPLIER_ID
+    LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__UOM zuom
+        ON pol.UNIT_OF_MEASURE_ID = zuom.ID
+    LEFT JOIN BIZ.DBT_STG.STG_ODOO_PROD__UOM_UOM ouom
+        ON zuom.ODOO_ID = ouom.ID
+    WHERE pov.STATUS = 'ISSUED'
+      AND op.DEFAULT_CODE IS NOT NULL
+),
+latest_zerp_po_lines AS (
+    SELECT
+        ID,
+        PURCHASE_ORDER_NUMBER,
+        LINE_NUMBER,
+        PO_CREATED_AT_LOCAL,
+        PART_NUMBER,
+        SUPPLIER_NAME,
+        REVISION,
+        UNIT_PRICE,
+        UOM_FACTOR,
+        UNIT_COST
+    FROM latest_zerp_po_line_versions
+    WHERE LINE_VERSION_RN = 1
+),
 latest_issued_po_candidates AS (
     SELECT
-        pol.ODOO_PART_CODE AS PART_NUMBER,
-        pol.MAJOR_REVISION AS REVISION,
-        po.PO_NUMBER,
-        po.SUPPLIER_NAME,
-        po.VERSION_CREATED_AT_LOCAL AS PO_CREATED_AT_LOCAL,
+        *,
         ROW_NUMBER() OVER (
-            PARTITION BY pol.ODOO_PART_CODE, COALESCE(pol.MAJOR_REVISION, '')
-            ORDER BY po.VERSION_CREATED_AT_LOCAL DESC, po.PO_VERSION_ID DESC, pol.LINE_ID DESC
+            PARTITION BY PART_NUMBER, COALESCE(REVISION, '')
+            ORDER BY PO_CREATED_AT_LOCAL DESC, PURCHASE_ORDER_NUMBER DESC, LINE_NUMBER DESC, ID DESC
         ) AS RN
-    FROM BIZ.DBT.FCT_ZERP_PURCHASING_PURCHASE_ORDER_LINES pol
-    INNER JOIN BIZ.DBT.FCT_ZERP_PURCHASING_PURCHASE_ORDERS po
-        ON pol.PO_VERSION_ID = po.PO_VERSION_ID
-    WHERE po.PO_STATUS = 'ISSUED'
-      AND pol.ODOO_PART_CODE IS NOT NULL
+    FROM latest_zerp_po_lines
 ),
 latest_issued_po AS (
     SELECT
         PART_NUMBER,
         REVISION,
-        PO_NUMBER AS "Latest PO",
+        PURCHASE_ORDER_NUMBER AS "Latest PO",
         SUPPLIER_NAME AS "Latest Supplier",
-        PO_CREATED_AT_LOCAL AS "Latest PO Creation Date"
+        PO_CREATED_AT_LOCAL AS "Latest PO Creation Date",
+        UNIT_COST
     FROM latest_issued_po_candidates
     WHERE RN = 1
 ),
-product_values AS (
+part_unit_cost_candidates AS (
     SELECT
-        DEFAULT_CODE AS PART_NUMBER,
-        MAX(PRODUCT_VALUE) AS PRODUCT_VALUE
-    FROM BIZ.DBT_ODOO.PRODUCTS
-    WHERE DEFAULT_CODE IS NOT NULL
-    GROUP BY DEFAULT_CODE
+        *,
+        ROW_NUMBER() OVER (
+            PARTITION BY PART_NUMBER
+            ORDER BY PO_CREATED_AT_LOCAL DESC, PURCHASE_ORDER_NUMBER DESC, LINE_NUMBER DESC, ID DESC
+        ) AS RN
+    FROM latest_zerp_po_lines
+),
+part_unit_costs AS (
+    SELECT
+        PART_NUMBER,
+        UNIT_COST
+    FROM part_unit_cost_candidates
+    WHERE RN = 1
 ),
 location_category_map AS (
     SELECT
@@ -704,14 +755,14 @@ inventory_metrics AS (
     SELECT
         inv.DEFAULT_CODE AS PART_NUMBER,
         SUM(CASE WHEN lcm.MRP_CATEGORY IN ('Warehouse', 'Receiving & Pre-IQC') THEN inv.QUANTITY ELSE 0 END) AS "Current On-Hand Quantity",
-        SUM(CASE WHEN lcm.MRP_CATEGORY IN ('Warehouse', 'Receiving & Pre-IQC') THEN inv.QUANTITY * COALESCE(pv.PRODUCT_VALUE, 0) ELSE 0 END) AS "Current On-Hand Inventory Value",
+        SUM(CASE WHEN lcm.MRP_CATEGORY IN ('Warehouse', 'Receiving & Pre-IQC') THEN inv.QUANTITY * COALESCE(puc.UNIT_COST, 0) ELSE 0 END) AS "Current On-Hand Inventory Value",
         SUM(CASE WHEN lcm.MRP_CATEGORY = 'Receiving & Pre-IQC' THEN inv.QUANTITY ELSE 0 END) AS "Current Receiving & Pre-IQC Quantity",
         SUM(CASE WHEN lcm.MRP_CATEGORY = 'Quarantine' THEN inv.QUANTITY ELSE 0 END) AS "Current Quarantine Quantity"
     FROM BIZ.DBT_ODOO.INVENTORY inv
     LEFT JOIN location_category_map lcm
         ON lcm.ID = inv.STOCK_LOCATION_ID
-    LEFT JOIN product_values pv
-        ON pv.PART_NUMBER = inv.DEFAULT_CODE
+    LEFT JOIN part_unit_costs puc
+        ON puc.PART_NUMBER = inv.DEFAULT_CODE
     GROUP BY inv.DEFAULT_CODE
 ),
 shipments_normalized AS (
@@ -1164,7 +1215,7 @@ SELECT
     COALESCE(aitm."in-transit quantity including alternates", 0) AS "in-transit quantity including alternates",
     CAST(
         COALESCE(aitm."in-transit quantity including alternates", 0)
-        * COALESCE(pv.PRODUCT_VALUE, 0)
+        * COALESCE(puc.UNIT_COST, 0)
         AS FLOAT
     ) AS "in-transit inventory value including alternates",
     COALESCE(im."Current On-Hand Quantity", 0)
@@ -1186,7 +1237,7 @@ SELECT
     ) AS "Current On Hand Quantity Including alternates and parents",
     CAST(
         COALESCE(aim."Current On-Hand Inventory Value with alternates", 0)
-        + COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(pv.PRODUCT_VALUE, 0)
+        + COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(puc.UNIT_COST, 0)
         AS FLOAT
     ) AS "Current On Hand Inventory Value Including alternates and parents",
     CAST(
@@ -1288,8 +1339,8 @@ LEFT JOIN planning_alternates pa
 LEFT JOIN latest_issued_po lpo
     ON fpl.PART_NUMBER = lpo.PART_NUMBER
    AND COALESCE(fpl.REVISION, '') = COALESCE(lpo.REVISION, '')
-LEFT JOIN product_values pv
-    ON fpl.PART_NUMBER = pv.PART_NUMBER
+LEFT JOIN part_unit_costs puc
+    ON fpl.PART_NUMBER = puc.PART_NUMBER
 LEFT JOIN demand_metrics dm
     ON fpl.PATH = dm.PATH
 LEFT JOIN part_number_demand_metrics pdm

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -73,6 +74,26 @@ def test_total_rollup_uses_max_zipline_buy_on_demanded_top_level_boms() -> None:
         assert 'CAST(prq."total rolled up quantity" AS FLOAT) AS "total rolled up quantity"' in sql
         assert "TO_VARCHAR(MAX(TOTAL_ROLLED_UP_QUANTITY))" not in sql
         assert "mutliple" not in sql
+
+
+def test_report_only_expands_current_or_future_demanded_top_levels() -> None:
+    for sql_file in SQL_FILES:
+        sql = sql_file.read_text()
+
+        assert "eligible_top_levels AS" in sql
+        assert "AND COALESCE(QUANTITY, 0) > 0" in sql
+        if sql_file == Path("sql/final_report.sql"):
+            assert (
+                "AND DATE_TRUNC('week', TRY_TO_DATE(DATE, 'MM/DD/YYYY')) "
+                ">= DATE_TRUNC('week', TO_DATE('${as_of_date}'))"
+                in sql
+            )
+        else:
+            assert (
+                "AND DATE_TRUNC('week', TRY_TO_DATE(DATE, 'MM/DD/YYYY')) "
+                ">= DATE_TRUNC('week', (SELECT as_of_date FROM params))"
+                in sql
+            )
 
 
 def test_average_since_last_receipt_is_each_per_week() -> None:
@@ -277,12 +298,14 @@ def test_in_transit_quantity_filters_terminal_shipments() -> None:
     assert "FROM BIZ.DBT_ODOO.SHIPMENT_PACKING_LIST" in mode_sql
 
 
-def test_inventory_value_columns_use_latest_zerp_po_unit_costs() -> None:
+def test_inventory_value_columns_use_latest_zerp_po_unit_costs_with_q2_forecast_fallback() -> None:
     for sql_file in SQL_FILES:
         sql = sql_file.read_text()
 
         assert "latest_zerp_po_line_versions AS" in sql
         assert "latest_zerp_po_lines AS" in sql
+        assert "latest_zerp_part_unit_costs AS" in sql
+        assert "forecast_part_unit_costs AS" in sql
         assert "part_unit_costs AS" in sql
         assert "FROM BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER_LINE pol" in sql
         assert "LEFT JOIN BIZ.DBT_STG.STG_ZERP_PURCHASING__PURCHASE_ORDER_VERSION pov" in sql
@@ -296,6 +319,17 @@ def test_inventory_value_columns_use_latest_zerp_po_unit_costs() -> None:
         assert "WHEN ouom.FACTOR IS NULL THEN pol.UNIT_PRICE_UCENTS / 100000000.0" in sql
         assert "ELSE pol.UNIT_PRICE_UCENTS / 100000000.0 * ouom.FACTOR" in sql
         assert "END AS UNIT_COST" in sql
+        assert "V_2_26_Q_2 AS UNIT_COST" in sql
+        assert "UNIT_COST_26_Q_2 AS UNIT_COST" not in sql
+        if sql_file == Path("sql/final_report.sql"):
+            assert "FROM ${unit_cost_forecast}" in sql
+        else:
+            assert "FROM fivetran_google_sheets.supply_chain_unit_cost_forecast" in sql
+        assert "COALESCE(NULLIF(zp.UNIT_COST, 0), fuc.UNIT_COST) AS UNIT_COST" in sql
+        assert "WHEN NULLIF(zp.UNIT_COST, 0) IS NOT NULL THEN 'latest_zerp_po'" in sql
+        assert "WHEN fuc.UNIT_COST IS NOT NULL THEN 'q2_unit_cost_forecast'" in sql
+        assert 'puc.UNIT_COST AS "Unit Cost Used"' in sql
+        assert 'puc.UNIT_COST_SOURCE AS "Unit Cost Source"' in sql
         assert "WHERE LINE_VERSION_RN = 1" in sql
         assert "PURCHASE_ORDER_NUMBER AS \"Latest PO\"" in sql
         assert 'AS "Current On-Hand Inventory Value"' in sql
@@ -318,6 +352,75 @@ def test_inventory_value_columns_use_latest_zerp_po_unit_costs() -> None:
         assert 'COALESCE(aim."Current On-Hand Inventory Value with alternates", 0)' in sql
         assert 'COALESCE(blpm."On Hand Quantity In Parents", 0) * COALESCE(puc.UNIT_COST, 0)' in sql
         assert "LEFT JOIN part_unit_costs puc" in sql
+
+
+def test_mode_publish_notebook_includes_unit_cost_source() -> None:
+    notebook = json.loads(Path("notebooks/mode_bom_capacity_publish.ipynb").read_text())
+    source = "".join(notebook["cells"][1]["source"])
+
+    assert '"Unit Cost Source"' in source
+    assert '"Unit Cost Used"' in source
+    assert source.index('"Latest PO Creation Date"') < source.index('"Unit Cost Used"')
+    assert source.index('"Unit Cost Used"') < source.index('"Unit Cost Source"')
+    assert source.index('"Unit Cost Source"') < source.index('"Product"')
+
+
+def test_parent_alternate_stock_and_set_columns_are_standalone() -> None:
+    for sql_file in SQL_FILES:
+        sql = sql_file.read_text()
+
+        assert "parent_alternate_candidates AS" in sql
+        assert "latest_alternate_parent_revisions AS" in sql
+        assert "alternate_parent_bom_requirements AS" in sql
+        assert "alternate_parent_component_related_parts AS" in sql
+        assert "part_current_week_net_demand AS" in sql
+        assert "alternate_parent_component_supply AS" in sql
+        assert "alternate_parent_buildable_sets AS" in sql
+        assert "bom_line_parent_alternate_metrics AS" in sql
+        assert "ab.BASE_PART_NUMBER = blpu.PARENT_PART_NUMBER" in sql
+        assert "ab.RELATED_PART_NUMBER <> blpu.PARENT_PART_NUMBER" in sql
+        assert "MAX(COALESCE(bh.TOP_LEVEL_REVISION, '')) AS TOP_LEVEL_REVISION" in sql
+        assert "bh.ADJUSTED_PROCUREMENT_INTENT = 'zipline_buy'" in sql
+        assert "NOT COALESCE(TRY_TO_BOOLEAN(TO_VARCHAR(bh.IS_CONSUMABLE_STORABLE)), FALSE)" in sql
+        assert (
+            "SUM(COALESCE(im.\"Current On-Hand Quantity\", 0))\n"
+            "                - SUM(COALESCE(pcwnd.CURRENT_WEEK_NET_DEMAND, 0))"
+            in sql
+        )
+        assert "SUM(COALESCE(itm.IN_TRANSIT_QUANTITY, 0))" in sql
+        assert (
+            "MIN(apcs.COMPONENT_AVAILABLE_ON_HAND / NULLIF(apbr.COMPONENT_REQUIRED_QUANTITY, 0))"
+            in sql
+        )
+        assert (
+            "MIN(apcs.COMPONENT_AVAILABLE_ON_HAND_IN_TRANSIT / NULLIF(apbr.COMPONENT_REQUIRED_QUANTITY, 0))"
+            in sql
+        )
+        assert (
+            'COALESCE(blpam."On Hand Quantity In Alternates Of Parents", 0) '
+            'AS "On Hand Quantity In Alternates Of Parents"'
+            in sql
+        )
+        assert (
+            'COALESCE(blpam."In-Transit Quantity In Alternates Of Parents", 0) '
+            'AS "In-Transit Quantity In Alternates Of Parents"'
+            in sql
+        )
+        assert 'AS "on hand product sets of alternates of parents"' in sql
+        assert 'AS "on hand + in transit product sets of alternates of parents"' in sql
+        assert "LEFT JOIN bom_line_parent_alternate_metrics blpam" in sql
+        assert 'COALESCE(blpm.ON_HAND_PRODUCT_SETS_IN_PARENTS, 0)' in sql
+
+
+def test_mode_publish_notebook_includes_parent_alternate_columns() -> None:
+    notebook = json.loads(Path("notebooks/mode_bom_capacity_publish.ipynb").read_text())
+    source = "".join(notebook["cells"][1]["source"])
+
+    assert '"On Hand Quantity In Alternates Of Parents"' in source
+    assert '"In-Transit Quantity In Alternates Of Parents"' in source
+    assert '"on hand product sets of alternates of parents"' in source
+    assert '"on hand + in transit product sets of alternates of parents"' in source
+    assert "PARENT_ALTERNATE_COLUMNS" in source
 
 
 def test_on_hand_quantity_in_parents_excludes_top_level_assemblies() -> None:

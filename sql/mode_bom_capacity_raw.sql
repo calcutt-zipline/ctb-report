@@ -7,6 +7,8 @@ eligible_top_levels AS (
         REVISION
     FROM fivetran_google_sheets.supply_chain_capacity_demand_by_part_number
     WHERE PART_NUMBER IS NOT NULL
+      AND COALESCE(QUANTITY, 0) > 0
+      AND DATE_TRUNC('week', TRY_TO_DATE(DATE, 'MM/DD/YYYY')) >= DATE_TRUNC('week', (SELECT as_of_date FROM params))
 ),
 demanded_top_level_boms AS (
     SELECT DISTINCT
@@ -365,12 +367,42 @@ part_unit_cost_candidates AS (
         ) AS RN
     FROM latest_zerp_po_lines
 ),
-part_unit_costs AS (
+latest_zerp_part_unit_costs AS (
     SELECT
         PART_NUMBER,
         UNIT_COST
     FROM part_unit_cost_candidates
     WHERE RN = 1
+),
+forecast_part_unit_costs AS (
+    SELECT
+        PART_NUMBER,
+        V_2_26_Q_2 AS UNIT_COST
+    FROM (
+        SELECT
+            NULLIF(TRIM(PART_NUMBER), '') AS PART_NUMBER,
+            V_2_26_Q_2,
+            ROW_NUMBER() OVER (
+                PARTITION BY NULLIF(TRIM(PART_NUMBER), '')
+                ORDER BY _FIVETRAN_SYNCED DESC NULLS LAST, V_2_26_Q_2 DESC NULLS LAST
+            ) AS RN
+        FROM fivetran_google_sheets.supply_chain_unit_cost_forecast
+        WHERE NULLIF(TRIM(PART_NUMBER), '') IS NOT NULL
+          AND V_2_26_Q_2 IS NOT NULL
+    )
+    WHERE RN = 1
+),
+part_unit_costs AS (
+    SELECT
+        COALESCE(zp.PART_NUMBER, fuc.PART_NUMBER) AS PART_NUMBER,
+        COALESCE(NULLIF(zp.UNIT_COST, 0), fuc.UNIT_COST) AS UNIT_COST,
+        CASE
+            WHEN NULLIF(zp.UNIT_COST, 0) IS NOT NULL THEN 'latest_zerp_po'
+            WHEN fuc.UNIT_COST IS NOT NULL THEN 'q2_unit_cost_forecast'
+        END AS UNIT_COST_SOURCE
+    FROM latest_zerp_part_unit_costs zp
+    FULL OUTER JOIN forecast_part_unit_costs fuc
+        ON zp.PART_NUMBER = fuc.PART_NUMBER
 ),
 location_category_map AS (
     SELECT
@@ -873,6 +905,143 @@ alternate_in_transit_metrics AS (
        AND alternate_itm.IN_TRANSIT_QUANTITY > 0
     GROUP BY rp.PART_NUMBER, base_itm.IN_TRANSIT_QUANTITY
 ),
+parent_alternate_candidates AS (
+    SELECT DISTINCT
+        blpu.PATH,
+        blpu.PARENT_PART_NUMBER,
+        blpu.CHILD_QUANTITY_IN_PARENT,
+        ab.RELATED_PART_NUMBER AS ALTERNATE_PARENT_PART_NUMBER
+    FROM bom_line_parent_usage blpu
+    INNER JOIN alternate_part_bridge ab
+        ON ab.BASE_PART_NUMBER = blpu.PARENT_PART_NUMBER
+       AND ab.RELATED_PART_NUMBER <> blpu.PARENT_PART_NUMBER
+),
+latest_alternate_parent_revisions AS (
+    SELECT
+        pac.ALTERNATE_PARENT_PART_NUMBER,
+        MAX(COALESCE(bh.TOP_LEVEL_REVISION, '')) AS TOP_LEVEL_REVISION
+    FROM (
+        SELECT DISTINCT ALTERNATE_PARENT_PART_NUMBER
+        FROM parent_alternate_candidates
+    ) pac
+    INNER JOIN BIZ.DBT.DIM_BOM_HIERARCHY bh
+        ON bh.TOP_LEVEL_BOM = pac.ALTERNATE_PARENT_PART_NUMBER
+    WHERE bh.PART_NUMBER IS NOT NULL
+    GROUP BY pac.ALTERNATE_PARENT_PART_NUMBER
+),
+alternate_parent_bom_requirements AS (
+    SELECT
+        lapr.ALTERNATE_PARENT_PART_NUMBER,
+        bh.PART_NUMBER AS COMPONENT_PART_NUMBER,
+        SUM(COALESCE(bh.ADJUSTED_QUANTITY, 0)) AS COMPONENT_REQUIRED_QUANTITY
+    FROM latest_alternate_parent_revisions lapr
+    INNER JOIN BIZ.DBT.DIM_BOM_HIERARCHY bh
+        ON bh.TOP_LEVEL_BOM = lapr.ALTERNATE_PARENT_PART_NUMBER
+       AND COALESCE(bh.TOP_LEVEL_REVISION, '') = lapr.TOP_LEVEL_REVISION
+    WHERE bh.PART_NUMBER IS NOT NULL
+      AND bh.ADJUSTED_PROCUREMENT_INTENT = 'zipline_buy'
+      AND NOT COALESCE(TRY_TO_BOOLEAN(TO_VARCHAR(bh.IS_CONSUMABLE_STORABLE)), FALSE)
+      AND (
+          NULLIF(TRIM(bh.PARENT_BOM), '') IS NOT NULL
+          OR COALESCE(bh.INDENT_LEVEL, 0) > 0
+      )
+      AND COALESCE(bh.ADJUSTED_QUANTITY, 0) > 0
+    GROUP BY lapr.ALTERNATE_PARENT_PART_NUMBER, bh.PART_NUMBER
+),
+alternate_parent_requirement_parts AS (
+    SELECT DISTINCT COMPONENT_PART_NUMBER
+    FROM alternate_parent_bom_requirements
+),
+alternate_parent_component_related_parts AS (
+    SELECT DISTINCT
+        aprp.COMPONENT_PART_NUMBER AS BASE_COMPONENT_PART_NUMBER,
+        COALESCE(apg2.PART_NUMBER, aprp.COMPONENT_PART_NUMBER) AS RELATED_PART_NUMBER
+    FROM alternate_parent_requirement_parts aprp
+    LEFT JOIN alternate_part_groups apg1
+        ON apg1.PART_NUMBER = aprp.COMPONENT_PART_NUMBER
+    LEFT JOIN alternate_part_groups apg2
+        ON apg1.GROUP_ID = apg2.GROUP_ID
+),
+part_current_week_net_demand AS (
+    SELECT
+        PART_NUMBER,
+        SUM(COALESCE("Net Total Demand for Part Number in current week", 0)) AS CURRENT_WEEK_NET_DEMAND
+    FROM part_number_demand_metrics
+    GROUP BY PART_NUMBER
+),
+alternate_parent_component_supply AS (
+    SELECT
+        apcrp.BASE_COMPONENT_PART_NUMBER AS COMPONENT_PART_NUMBER,
+        GREATEST(
+            SUM(COALESCE(im."Current On-Hand Quantity", 0))
+                - SUM(COALESCE(pcwnd.CURRENT_WEEK_NET_DEMAND, 0)),
+            0
+        ) AS COMPONENT_AVAILABLE_ON_HAND,
+        GREATEST(
+            SUM(COALESCE(im."Current On-Hand Quantity", 0))
+                + SUM(COALESCE(itm.IN_TRANSIT_QUANTITY, 0))
+                - SUM(COALESCE(pcwnd.CURRENT_WEEK_NET_DEMAND, 0)),
+            0
+        ) AS COMPONENT_AVAILABLE_ON_HAND_IN_TRANSIT
+    FROM alternate_parent_component_related_parts apcrp
+    LEFT JOIN inventory_metrics im
+        ON im.PART_NUMBER = apcrp.RELATED_PART_NUMBER
+    LEFT JOIN in_transit_metrics itm
+        ON itm.PART_NUMBER = apcrp.RELATED_PART_NUMBER
+    LEFT JOIN part_current_week_net_demand pcwnd
+        ON pcwnd.PART_NUMBER = apcrp.RELATED_PART_NUMBER
+    GROUP BY apcrp.BASE_COMPONENT_PART_NUMBER
+),
+alternate_parent_buildable_sets AS (
+    SELECT
+        apbr.ALTERNATE_PARENT_PART_NUMBER,
+        COALESCE(
+            MIN(apcs.COMPONENT_AVAILABLE_ON_HAND / NULLIF(apbr.COMPONENT_REQUIRED_QUANTITY, 0)),
+            0
+        ) AS ON_HAND_PRODUCT_SETS_OF_ALTERNATE_PARENT,
+        COALESCE(
+            MIN(apcs.COMPONENT_AVAILABLE_ON_HAND_IN_TRANSIT / NULLIF(apbr.COMPONENT_REQUIRED_QUANTITY, 0)),
+            0
+        ) AS ON_HAND_IN_TRANSIT_PRODUCT_SETS_OF_ALTERNATE_PARENT
+    FROM alternate_parent_bom_requirements apbr
+    LEFT JOIN alternate_parent_component_supply apcs
+        ON apcs.COMPONENT_PART_NUMBER = apbr.COMPONENT_PART_NUMBER
+    GROUP BY apbr.ALTERNATE_PARENT_PART_NUMBER
+),
+bom_line_parent_alternate_metrics AS (
+    SELECT
+        pac.PATH,
+        CAST(
+            SUM(
+                COALESCE(alternate_parent_im."Current On-Hand Quantity", 0)
+                * COALESCE(pac.CHILD_QUANTITY_IN_PARENT, 0)
+            )
+            AS FLOAT
+        ) AS "On Hand Quantity In Alternates Of Parents",
+        CAST(
+            SUM(
+                COALESCE(alternate_parent_itm.IN_TRANSIT_QUANTITY, 0)
+                * COALESCE(pac.CHILD_QUANTITY_IN_PARENT, 0)
+            )
+            AS FLOAT
+        ) AS "In-Transit Quantity In Alternates Of Parents",
+        CAST(
+            SUM(COALESCE(apbs.ON_HAND_PRODUCT_SETS_OF_ALTERNATE_PARENT, 0))
+            AS FLOAT
+        ) AS "on hand product sets of alternates of parents",
+        CAST(
+            SUM(COALESCE(apbs.ON_HAND_IN_TRANSIT_PRODUCT_SETS_OF_ALTERNATE_PARENT, 0))
+            AS FLOAT
+        ) AS "on hand + in transit product sets of alternates of parents"
+    FROM parent_alternate_candidates pac
+    LEFT JOIN inventory_metrics alternate_parent_im
+        ON alternate_parent_im.PART_NUMBER = pac.ALTERNATE_PARENT_PART_NUMBER
+    LEFT JOIN in_transit_metrics alternate_parent_itm
+        ON alternate_parent_itm.PART_NUMBER = pac.ALTERNATE_PARENT_PART_NUMBER
+    LEFT JOIN alternate_parent_buildable_sets apbs
+        ON apbs.ALTERNATE_PARENT_PART_NUMBER = pac.ALTERNATE_PARENT_PART_NUMBER
+    GROUP BY pac.PATH
+),
 bom_line_parent_metrics AS (
     SELECT
         blpu.PATH,
@@ -1190,6 +1359,8 @@ SELECT
     lpo."Latest PO",
     lpo."Latest Supplier",
     lpo."Latest PO Creation Date",
+    puc.UNIT_COST AS "Unit Cost Used",
+    puc.UNIT_COST_SOURCE AS "Unit Cost Source",
     fpl."Product",
     fpl."Variant",
     fpl."System",
@@ -1212,6 +1383,8 @@ SELECT
     im."Current On-Hand Quantity",
     im."Current Receiving & Pre-IQC Quantity",
     COALESCE(blpm."On Hand Quantity In Parents", 0) AS "On Hand Quantity In Parents",
+    COALESCE(blpam."On Hand Quantity In Alternates Of Parents", 0) AS "On Hand Quantity In Alternates Of Parents",
+    COALESCE(blpam."In-Transit Quantity In Alternates Of Parents", 0) AS "In-Transit Quantity In Alternates Of Parents",
     COALESCE(aitm."in-transit quantity including alternates", 0) AS "in-transit quantity including alternates",
     CAST(
         COALESCE(aitm."in-transit quantity including alternates", 0)
@@ -1257,6 +1430,14 @@ SELECT
         END
         AS FLOAT
     ) AS "receiving & pre-iqc product sets",
+    COALESCE(
+        blpam."on hand product sets of alternates of parents",
+        0
+    ) AS "on hand product sets of alternates of parents",
+    COALESCE(
+        blpam."on hand + in transit product sets of alternates of parents",
+        0
+    ) AS "on hand + in transit product sets of alternates of parents",
     CAST(
         CASE
             WHEN (
@@ -1356,6 +1537,8 @@ LEFT JOIN alternate_in_transit_metrics aitm
     ON fpl.PART_NUMBER = aitm.PART_NUMBER
 LEFT JOIN bom_line_parent_metrics blpm
     ON fpl.PATH = blpm.PATH
+LEFT JOIN bom_line_parent_alternate_metrics blpam
+    ON fpl.PATH = blpam.PATH
 LEFT JOIN alternate_inventory_metrics aim
     ON fpl.PART_NUMBER = aim.PART_NUMBER
 LEFT JOIN bom_line_weeks_of_stock pwos

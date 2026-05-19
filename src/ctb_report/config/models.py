@@ -80,6 +80,7 @@ class RelationsConfig:
     flat_parts_list: str = "fivetran_google_sheets.supply_chain_flat_parts_list"
     alternate_part_numbers: str = "fivetran_google_sheets.supply_chain_alternate_part_numbers"
     alternate_part_numbers_column: str = '"PART_NUMBERS"'
+    unit_cost_forecast: str = "fivetran_google_sheets.supply_chain_unit_cost_forecast"
     supply_plans: str = "fivetran_google_sheets.supply_chain_supply_plans"
     stock_move: str = "BIZ.DBT_STG.STG_ODOO_PROD__STOCK_MOVE"
     product_product: str = "BIZ.DBT_STG.STG_ODOO_PROD__PRODUCT_PRODUCT"

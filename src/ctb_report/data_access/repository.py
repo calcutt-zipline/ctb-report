@@ -23,6 +23,7 @@ class ReportRepository:
             flat_parts_list=config.relations.flat_parts_list,
             alternate_part_numbers=config.relations.alternate_part_numbers,
             alternate_part_numbers_column=config.relations.alternate_part_numbers_column,
+            unit_cost_forecast=config.relations.unit_cost_forecast,
             supply_plans=config.relations.supply_plans,
             stock_move=config.relations.stock_move,
             product_product=config.relations.product_product,

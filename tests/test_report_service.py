@@ -39,10 +39,14 @@ def test_report_service_shapes_final_columns() -> None:
     assert "on hand product sets including alternates" in df.columns
     assert "receiving & pre-iqc product sets" in df.columns
     assert "On Hand Quantity In Parents" in df.columns
+    assert "On Hand Quantity In Alternates Of Parents" in df.columns
+    assert "In-Transit Quantity In Alternates Of Parents" in df.columns
     assert "in-transit quantity including alternates" in df.columns
     assert "in-transit inventory value including alternates" in df.columns
     assert "Current On Hand Quantity Including alternates and parents" in df.columns
     assert "Current On Hand Inventory Value Including alternates and parents" in df.columns
+    assert "on hand product sets of alternates of parents" in df.columns
+    assert "on hand + in transit product sets of alternates of parents" in df.columns
     assert "on hand product sets including alternates and parents" in df.columns
     assert "on hand + in transit product sets" in df.columns
     assert "Weeks of Stock" in df.columns
@@ -51,6 +55,8 @@ def test_report_service_shapes_final_columns() -> None:
     assert "In Transit Weeks of Stock Of System's Minimum Weeks of Stock Part" in df.columns
     assert "Current Week Net Demand" in df.columns
     assert "Current Week Net Total Demand" in df.columns
+    assert "Unit Cost Used" in df.columns
+    assert "Unit Cost Source" in df.columns
 
 
 def test_report_service_backfills_current_week_net_demand_from_existing_total_column() -> None:
@@ -336,6 +342,159 @@ def test_report_service_calculates_on_hand_quantity_in_non_top_level_parents() -
         "on hand + in transit product sets",
     ].tolist() == [2.0]
     assert pd.api.types.is_numeric_dtype(df["On Hand Quantity In Parents"])
+    assert pd.api.types.is_numeric_dtype(df["On Hand Quantity In Alternates Of Parents"])
+    assert pd.api.types.is_numeric_dtype(df["In-Transit Quantity In Alternates Of Parents"])
     assert pd.api.types.is_numeric_dtype(df["Current On Hand Quantity Including alternates and parents"])
+    assert pd.api.types.is_numeric_dtype(df["on hand product sets of alternates of parents"])
+    assert pd.api.types.is_numeric_dtype(df["on hand + in transit product sets of alternates of parents"])
     assert pd.api.types.is_numeric_dtype(df["on hand product sets including alternates and parents"])
     assert pd.api.types.is_numeric_dtype(df["on hand + in transit product sets"])
+
+
+def test_report_service_calculates_parent_alternate_stock_and_buildable_sets() -> None:
+    service = BomCapacityReportService(
+        FakeRepository(
+            [
+                {
+                    "PATH": "|TOP|",
+                    "PART_NUMBER": "TOP",
+                    "PARENT_BOM": None,
+                    "TOP_LEVEL_BOM": "TOP",
+                    "TOP_LEVEL_REVISION": "R1",
+                    "INDENT_LEVEL": 0,
+                    "ADJUSTED_QUANTITY": 1,
+                    "ADJUSTED_PROCUREMENT_INTENT": "make",
+                    "Current On-Hand Quantity": 0,
+                    "Current On-Hand Quantity with alternates": 0,
+                },
+                {
+                    "PATH": "|TOP|PARENT|",
+                    "PART_NUMBER": "PARENT",
+                    "PARENT_BOM": "TOP",
+                    "TOP_LEVEL_BOM": "TOP",
+                    "TOP_LEVEL_REVISION": "R1",
+                    "INDENT_LEVEL": 1,
+                    "ADJUSTED_QUANTITY": 1,
+                    "ADJUSTED_PROCUREMENT_INTENT": "make",
+                    "Supply Plan and On-Hand Alternates": "ALT_PARENT",
+                    "Current On-Hand Quantity": 0,
+                    "Current On-Hand Quantity with alternates": 0,
+                    "in-transit quantity including alternates": 0,
+                },
+                {
+                    "PATH": "|TOP|PARENT|CHILD|",
+                    "PART_NUMBER": "CHILD",
+                    "PARENT_BOM": "PARENT",
+                    "TOP_LEVEL_BOM": "TOP",
+                    "TOP_LEVEL_REVISION": "R1",
+                    "INDENT_LEVEL": 2,
+                    "ADJUSTED_QUANTITY": 2,
+                    "ADJUSTED_PROCUREMENT_INTENT": "zipline_buy",
+                    "Current On-Hand Quantity": 10,
+                    "Current On-Hand Quantity with alternates": 10,
+                    "Current Week Net Demand": 0,
+                    "in-transit quantity including alternates": 0,
+                },
+                {
+                    "PATH": "|ALT_PARENT|",
+                    "PART_NUMBER": "ALT_PARENT",
+                    "PARENT_BOM": None,
+                    "TOP_LEVEL_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_REVISION": "A",
+                    "INDENT_LEVEL": 0,
+                    "ADJUSTED_QUANTITY": 1,
+                    "ADJUSTED_PROCUREMENT_INTENT": "make",
+                    "Supply Plan and On-Hand Alternates": "PARENT",
+                    "Current On-Hand Quantity": 5,
+                    "Current On-Hand Quantity with alternates": 5,
+                    "in-transit quantity including alternates": 3,
+                },
+                {
+                    "PATH": "|ALT_PARENT|COMP_A|",
+                    "PART_NUMBER": "COMP_A",
+                    "PARENT_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_REVISION": "A",
+                    "INDENT_LEVEL": 1,
+                    "ADJUSTED_QUANTITY": 100,
+                    "ADJUSTED_PROCUREMENT_INTENT": "zipline_buy",
+                    "Supply Plan and On-Hand Alternates": "COMP_A_ALT",
+                    "Current On-Hand Quantity": 5,
+                    "Current Week Net Demand": 1,
+                    "in-transit quantity including alternates": 0,
+                },
+                {
+                    "PATH": "|ALT_PARENT_B|",
+                    "PART_NUMBER": "ALT_PARENT",
+                    "PARENT_BOM": None,
+                    "TOP_LEVEL_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_REVISION": "B",
+                    "INDENT_LEVEL": 0,
+                    "ADJUSTED_QUANTITY": 1,
+                    "ADJUSTED_PROCUREMENT_INTENT": "make",
+                    "Supply Plan and On-Hand Alternates": "PARENT",
+                    "Current On-Hand Quantity": 5,
+                    "Current On-Hand Quantity with alternates": 5,
+                    "in-transit quantity including alternates": 3,
+                },
+                {
+                    "PATH": "|ALT_PARENT_B|COMP_A|",
+                    "PART_NUMBER": "COMP_A",
+                    "PARENT_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_REVISION": "B",
+                    "INDENT_LEVEL": 1,
+                    "ADJUSTED_QUANTITY": 2,
+                    "ADJUSTED_PROCUREMENT_INTENT": "zipline_buy",
+                    "IS_CONSUMABLE_STORABLE": False,
+                    "Supply Plan and On-Hand Alternates": "COMP_A_ALT",
+                    "Current On-Hand Quantity": 5,
+                    "Current Week Net Demand": 1,
+                    "in-transit quantity including alternates": 0,
+                },
+                {
+                    "PATH": "|ALT_PARENT_B|COMP_B|",
+                    "PART_NUMBER": "COMP_B",
+                    "PARENT_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_BOM": "ALT_PARENT",
+                    "TOP_LEVEL_REVISION": "B",
+                    "INDENT_LEVEL": 1,
+                    "ADJUSTED_QUANTITY": 4,
+                    "ADJUSTED_PROCUREMENT_INTENT": "zipline_buy",
+                    "IS_CONSUMABLE_STORABLE": False,
+                    "Current On-Hand Quantity": 20,
+                    "Current Week Net Demand": 8,
+                    "in-transit quantity including alternates": 4,
+                },
+                {
+                    "PATH": "|COMP_A_ALT|",
+                    "PART_NUMBER": "COMP_A_ALT",
+                    "PARENT_BOM": None,
+                    "TOP_LEVEL_BOM": "COMP_A_ALT",
+                    "TOP_LEVEL_REVISION": "R1",
+                    "INDENT_LEVEL": 0,
+                    "ADJUSTED_QUANTITY": 1,
+                    "ADJUSTED_PROCUREMENT_INTENT": "make",
+                    "Supply Plan and On-Hand Alternates": "COMP_A",
+                    "Current On-Hand Quantity": 4,
+                    "Current Week Net Demand": 0,
+                    "in-transit quantity including alternates": 0,
+                },
+            ]
+        )
+    )
+    config = ReportConfig(
+        snowflake=SnowflakeConfig(account="acct", user="user"),
+        as_of_date=date(2026, 4, 23),
+    )
+
+    df = service.run(config)
+    child_row = df[df["PART_NUMBER"] == "CHILD"].iloc[0]
+
+    assert child_row["On Hand Quantity In Alternates Of Parents"] == pytest.approx(10.0)
+    assert child_row["In-Transit Quantity In Alternates Of Parents"] == pytest.approx(6.0)
+    assert child_row["on hand product sets of alternates of parents"] == pytest.approx(3.0)
+    assert child_row["on hand + in transit product sets of alternates of parents"] == pytest.approx(4.0)
+    assert child_row["Current On Hand Quantity Including alternates and parents"] == pytest.approx(10.0)
+    assert child_row["on hand product sets including alternates and parents"] == pytest.approx(5.0)
+    assert child_row["on hand + in transit product sets"] == pytest.approx(5.0)
